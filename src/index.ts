@@ -49,6 +49,19 @@ type Page<T> = {
   isLast?: boolean;
 };
 
+type ScreenReportRow = {
+  screen: string;
+  dcScreenId: number | string;
+  cloudScreenId: number | string;
+  status: string;
+  missingTabs: string[];
+  extraTabs: string[];
+  missingFields: string[];
+  extraFields: string[];
+  orderDifferences: string[];
+  errors: string[];
+};
+
 const dcDispatcher = new Agent({
   connect: {
     rejectUnauthorized: false,
@@ -421,34 +434,129 @@ function csvEscape(value: string | number): string {
 
 async function writeComparisonCsv(
   filePath: string,
-  rows: ComparisonRow[],
+  rows: ScreenReportRow[],
 ): Promise<void> {
-  const columns: (keyof ComparisonRow)[] = [
+  const columns: (keyof ScreenReportRow)[] = [
     "screen",
     "dcScreenId",
     "cloudScreenId",
-    "section",
-    "tab",
-    "item",
-    "dcId",
-    "cloudId",
-    "dcPosition",
-    "cloudPosition",
     "status",
-    "details",
+    "missingTabs",
+    "extraTabs",
+    "missingFields",
+    "extraFields",
+    "orderDifferences",
+    "errors",
   ];
 
   const lines = [
     columns.join(","),
     ...rows.map((row) =>
-      columns.map((column) => csvEscape(row[column])).join(","),
+      columns
+        .map((column) => {
+          const value = row[column];
+          const formatted = Array.isArray(value)
+            ? value.length > 0
+              ? value.join(" | ")
+              : "—"
+            : value === ""
+              ? "—"
+              : String(value);
+
+          return csvEscape(formatted);
+        })
+        .join(","),
     ),
   ];
 
   await writeFile(filePath, "\uFEFF" + lines.join("\r\n"), "utf8");
 
   console.log(`CSV creato: ${filePath}`);
-  console.log(`Righe esportate: ${rows.length}`);
+  console.log(`Screen esportati: ${rows.length}`);
+}
+
+function buildScreenReport(
+  screenName: string,
+  dc: ScreenSnapshot | undefined,
+  cloud: ScreenSnapshot | undefined,
+  errors: string[] = [],
+): ScreenReportRow {
+  const report: ScreenReportRow = {
+    screen: screenName,
+    dcScreenId: dc?.screen.id ?? "",
+    cloudScreenId: cloud?.screen.id ?? "",
+    status: "OK",
+    missingTabs: [],
+    extraTabs: [],
+    missingFields: [],
+    extraFields: [],
+    orderDifferences: [],
+    errors,
+  };
+
+  if (!dc || !cloud) {
+    report.status = "ERRORE";
+    return report;
+  }
+
+  const dcTabNames = dc.tabs.map(({ tab }) => normalize(tab.name));
+  const cloudTabNames = cloud.tabs.map(({ tab }) => normalize(tab.name));
+
+  report.missingTabs = dc.tabs
+    .filter(({ tab }) => !cloudTabNames.includes(normalize(tab.name)))
+    .map(({ tab }) => tab.name);
+
+  report.extraTabs = cloud.tabs
+    .filter(({ tab }) => !dcTabNames.includes(normalize(tab.name)))
+    .map(({ tab }) => tab.name);
+
+  if (dcTabNames.join("|") !== cloudTabNames.join("|")) {
+    report.orderDifferences.push(
+      `Ordine tab: DC [${dc.tabs.map(({ tab }) => tab.name).join(" → ")}] / ` +
+        `Cloud [${cloud.tabs.map(({ tab }) => tab.name).join(" → ")}]`,
+    );
+  }
+
+  for (const dcTab of dc.tabs) {
+    const cloudTab = cloud.tabs.find(
+      ({ tab }) => normalize(tab.name) === normalize(dcTab.tab.name),
+    );
+
+    if (!cloudTab) continue;
+
+    const dcNames = dcTab.fields.map(({ name }) => normalize(name));
+    const cloudNames = cloudTab.fields.map(({ name }) => normalize(name));
+
+    report.missingFields.push(
+      ...dcTab.fields
+        .filter(({ name }) => !cloudNames.includes(normalize(name)))
+        .map(({ name }) => `${name} (tab: ${dcTab.tab.name})`),
+    );
+
+    report.extraFields.push(
+      ...cloudTab.fields
+        .filter(({ name }) => !dcNames.includes(normalize(name)))
+        .map(({ name }) => `${name} (tab: ${cloudTab.tab.name})`),
+    );
+
+    if (dcNames.join("|") !== cloudNames.join("|")) {
+      report.orderDifferences.push(
+        `Campi "${dcTab.tab.name}": DC [${dcTab.fields.map(({ name }) => name).join(" → ")}] / ` +
+          `Cloud [${cloudTab.fields.map(({ name }) => name).join(" → ")}]`,
+      );
+    }
+  }
+
+  const hasDifferences =
+    report.missingTabs.length > 0 ||
+    report.extraTabs.length > 0 ||
+    report.missingFields.length > 0 ||
+    report.extraFields.length > 0 ||
+    report.orderDifferences.length > 0;
+
+  report.status = hasDifferences ? "DIFFERENZE" : "OK";
+
+  return report;
 }
 
 async function main(): Promise<void> {
@@ -493,7 +601,7 @@ async function main(): Promise<void> {
     screenNames = [screenName!];
   }
 
-  const allRows: ComparisonRow[] = [];
+  const allRows: ScreenReportRow[] = [];
 
   for (const name of screenNames) {
     console.log(`\n========== ${name} ==========`);
@@ -525,39 +633,22 @@ async function main(): Promise<void> {
       printSnapshot(dcSnapshot);
       printSnapshot(cloudSnapshot);
 
-      const rows = buildComparisonRows(name, dcSnapshot, cloudSnapshot);
+      const comparisonRows = buildComparisonRows(
+        name,
+        dcSnapshot,
+        cloudSnapshot,
+      );
 
-      printComparison(rows);
-      allRows.push(...rows);
+      printComparison(comparisonRows);
+
+      allRows.push(buildScreenReport(name, dcSnapshot, cloudSnapshot));
     } else {
-      const base = {
-        screen: name,
-        dcScreenId: dcSnapshot?.screen.id ?? "",
-        cloudScreenId: cloudSnapshot?.screen.id ?? "",
-        section: "error" as const,
-        tab: "",
-        item: name,
-        dcId: "",
-        cloudId: "",
-        dcPosition: "",
-        cloudPosition: "",
-      };
+      const errors = [
+        ...(dcError ? [`DC: ${dcError}`] : []),
+        ...(cloudError ? [`Cloud: ${cloudError}`] : []),
+      ];
 
-      if (!dcSnapshot) {
-        allRows.push({
-          ...base,
-          status: "DC_ERROR",
-          details: dcError,
-        });
-      }
-
-      if (!cloudSnapshot) {
-        allRows.push({
-          ...base,
-          status: "CLOUD_ERROR",
-          details: cloudError,
-        });
-      }
+      allRows.push(buildScreenReport(name, dcSnapshot, cloudSnapshot, errors));
     }
   }
 
@@ -565,14 +656,15 @@ async function main(): Promise<void> {
     await writeComparisonCsv(csvFile, allRows);
   }
 
-  const failed = allRows.filter(
-    (row) => row.status === "DC_ERROR" || row.status === "CLOUD_ERROR",
-  );
+  const failed = allRows.filter((row) => row.status === "ERRORE");
 
-  console.log("\n========== RIEPILOGO ==========");
-  console.log(`Screen richiesti: ${screenNames.length}`);
-  console.log(`Righe risultato: ${allRows.length}`);
-  console.log(`Errori di lettura: ${failed.length}`);
+  console.log(`Screen elaborati: ${allRows.length}`);
+  console.log(
+    `Screen con differenze: ${
+      allRows.filter((row) => row.status === "DIFFERENZE").length
+    }`,
+  );
+  console.log(`Screen con errori: ${failed.length}`);
 
   if (screensFile) {
     console.log(`File CSV: ${csvFile}`);
