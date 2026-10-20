@@ -47,8 +47,10 @@ function buildHeaders(environment: "dc" | "cloud") {
   };
 
   if (environment === "dc") {
-    headers["User-Agent"] =
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/117.0.0.0 Safari/537.36";
+    //   "X-Atlassian-Token": "no-check",
+    // "User-Agent": "curl/7.81.0"
+    headers["X-Atlassian-Token"] = "no-check";
+    headers["User-Agent"] = "curl/7.81.0";
   }
 
   if (environment === "cloud") {
