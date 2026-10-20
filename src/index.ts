@@ -92,11 +92,16 @@ async function jiraGet<T>(
   const url =
     `${baseUrl(environment)}/rest/api/${apiVersion(environment)}` + endpoint;
 
-  const response = await fetch(url, {
+  const options: RequestInit & { dispatcher?: Agent } = {
     method: "GET",
     headers: buildHeaders(environment),
-    ...(environment === "dc" ? { dispatcher: dcDispatcher } : {}),
-  });
+  };
+
+  if (environment === "dc") {
+    options.dispatcher = dcDispatcher;
+  }
+
+  const response = await fetch(url, options);
 
   if (!response.ok) {
     const body = await response.text();
