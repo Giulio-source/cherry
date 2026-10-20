@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Agent } from "undici";
+import { Agent, fetch } from "undici";
 
 type JiraScreen = {
   id: number;
@@ -92,16 +92,11 @@ async function jiraGet<T>(
   const url =
     `${baseUrl(environment)}/rest/api/${apiVersion(environment)}` + endpoint;
 
-  const options: RequestInit & { dispatcher?: Agent } = {
+  const response = await fetch(url, {
     method: "GET",
     headers: buildHeaders(environment),
-  };
-
-  if (environment === "dc") {
-    options.dispatcher = dcDispatcher;
-  }
-
-  const response = await fetch(url, options);
+    ...(environment === "dc" ? { dispatcher: dcDispatcher } : {}),
+  });
 
   if (!response.ok) {
     const body = await response.text();
