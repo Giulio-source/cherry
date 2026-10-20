@@ -342,19 +342,50 @@ async function main(): Promise<void> {
   }
 
   console.log(`Screen richiesto: "${screenName}"`);
-  console.log("Modalità: sola lettura; nessuna modifica verrà eseguita.");
+  console.log("Modalità: sola lettura.\n");
 
-  const [dcSnapshot, cloudSnapshot] = await Promise.all([
-    getScreenSnapshot("dc", screenName),
-    getScreenSnapshot("cloud", screenName),
-  ]);
+  let dcSnapshot: ScreenSnapshot | undefined;
+  let cloudSnapshot: ScreenSnapshot | undefined;
 
-  printSnapshot(dcSnapshot);
-  printSnapshot(cloudSnapshot);
-  compareSnapshots(dcSnapshot, cloudSnapshot);
+  try {
+    console.log("[DC] Connessione e lettura screen...");
+    dcSnapshot = await getScreenSnapshot("dc", screenName);
+    console.log("[DC] OK");
+  } catch (error) {
+    console.error("[DC] ERRORE:", error);
+    if (error instanceof Error && error.cause) {
+      console.error("[DC] Causa:", error.cause);
+    }
+  }
+
+  try {
+    console.log("\n[Cloud] Connessione e lettura screen...");
+    cloudSnapshot = await getScreenSnapshot("cloud", screenName);
+    console.log("[Cloud] OK");
+  } catch (error) {
+    console.error("[Cloud] ERRORE:", error);
+    if (error instanceof Error && error.cause) {
+      console.error("[Cloud] Causa:", error.cause);
+    }
+  }
+
+  if (dcSnapshot) printSnapshot(dcSnapshot);
+  if (cloudSnapshot) printSnapshot(cloudSnapshot);
+
+  if (dcSnapshot && cloudSnapshot) {
+    compareSnapshots(dcSnapshot, cloudSnapshot);
+  } else {
+    console.error(
+      "\nConfronto non eseguito: almeno uno dei due ambienti non è stato letto.",
+    );
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error: unknown) => {
-  console.error("\nERRORE:", error instanceof Error ? error.message : error);
+  console.error(
+    "\nERRORE FATALE:",
+    error instanceof Error ? error.message : error,
+  );
   process.exitCode = 1;
 });
