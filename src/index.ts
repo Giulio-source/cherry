@@ -28,6 +28,7 @@ type ScreenSnapshot = {
 
 type Page<T> = {
   values?: T[];
+  screens?: T[];
   total?: number;
   isLast?: boolean;
 };
@@ -140,7 +141,7 @@ async function getAllScreens(
       break;
     }
 
-    const values = result.values ?? [];
+    const values = result.values ?? result.screens ?? [];
 
     console.log(
       `[${environment.toUpperCase()}] Pagina: startAt=${startAt}, ` +
