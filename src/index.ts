@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Agent, fetch } from "undici";
+import { writeFile, readFile } from "node:fs/promises";
 
 type JiraScreen = {
   id: number;
@@ -24,6 +25,21 @@ type ScreenSnapshot = {
     tab: JiraTab;
     fields: JiraField[];
   }>;
+};
+
+type ComparisonRow = {
+  screen: string;
+  dcScreenId: number | string;
+  cloudScreenId: number | string;
+  section: "screen" | "tab" | "field" | "error";
+  tab: string;
+  item: string;
+  dcId: string | number;
+  cloudId: string | number;
+  dcPosition: number | string;
+  cloudPosition: number | string;
+  status: string;
+  details: string;
 };
 
 type Page<T> = {
@@ -248,173 +264,321 @@ function printSnapshot(snapshot: ScreenSnapshot): void {
   );
 }
 
-function compareSnapshots(dc: ScreenSnapshot, cloud: ScreenSnapshot): void {
-  console.log("\n========== CONFRONTO ==========");
+function buildComparisonRows(
+  screenName: string,
+  dc: ScreenSnapshot,
+  cloud: ScreenSnapshot,
+): ComparisonRow[] {
+  const rows: ComparisonRow[] = [];
 
-  console.log(
-    `Screen: "${dc.screen.name}" | DC ID=${dc.screen.id} | ` +
-      `Cloud ID=${cloud.screen.id}`,
+  const base = {
+    screen: screenName,
+    dcScreenId: dc.screen.id,
+    cloudScreenId: cloud.screen.id,
+  };
+
+  rows.push({
+    ...base,
+    section: "screen",
+    tab: "",
+    item: screenName,
+    dcId: dc.screen.id,
+    cloudId: cloud.screen.id,
+    dcPosition: "",
+    cloudPosition: "",
+    status: "FOUND_BOTH",
+    details: "Screen trovato in entrambi gli ambienti",
+  });
+
+  const dcTabMap = new Map(
+    dc.tabs.map((entry, index) => [
+      normalize(entry.tab.name),
+      { ...entry, position: index + 1 },
+    ]),
   );
 
-  const dcTabNames = dc.tabs.map(({ tab }) => normalize(tab.name));
-  const cloudTabNames = cloud.tabs.map(({ tab }) => normalize(tab.name));
-
-  const missingTabs = dc.tabs.filter(
-    ({ tab }) => !cloudTabNames.includes(normalize(tab.name)),
+  const cloudTabMap = new Map(
+    cloud.tabs.map((entry, index) => [
+      normalize(entry.tab.name),
+      { ...entry, position: index + 1 },
+    ]),
   );
 
-  const extraTabs = cloud.tabs.filter(
-    ({ tab }) => !dcTabNames.includes(normalize(tab.name)),
-  );
+  const allTabKeys = [...new Set([...dcTabMap.keys(), ...cloudTabMap.keys()])];
 
-  console.log("\n-- Tab --");
+  for (const key of allTabKeys) {
+    const dcTab = dcTabMap.get(key);
+    const cloudTab = cloudTabMap.get(key);
+    const tabName = dcTab?.tab.name ?? cloudTab?.tab.name ?? key;
 
-  console.log(
-    "Ordine tab DC:",
-    dc.tabs.map(({ tab }) => tab.name).join(" → ") || "(nessuna)",
-  );
+    let tabStatus: string;
 
-  console.log(
-    "Ordine tab Cloud:",
-    cloud.tabs.map(({ tab }) => tab.name).join(" → ") || "(nessuna)",
-  );
-
-  console.log(
-    "Tab mancanti su Cloud:",
-    missingTabs.map(({ tab }) => tab.name),
-  );
-
-  console.log(
-    "Tab aggiuntive su Cloud:",
-    extraTabs.map(({ tab }) => tab.name),
-  );
-
-  if (
-    missingTabs.length === 0 &&
-    extraTabs.length === 0 &&
-    dcTabNames.join("|") === cloudTabNames.join("|")
-  ) {
-    console.log("✓ Nomi e ordine delle tab corrispondono.");
-  } else if (missingTabs.length === 0 && extraTabs.length === 0) {
-    console.log(
-      "! Le tab esistono in entrambi gli ambienti, ma l'ordine differisce.",
-    );
-  }
-
-  console.log("\n-- Campi per tab --");
-
-  for (const dcTab of dc.tabs) {
-    const cloudTab = cloud.tabs.find(
-      ({ tab }) => normalize(tab.name) === normalize(dcTab.tab.name),
-    );
-
-    console.log(`\nTab: "${dcTab.tab.name}"`);
-
-    if (!cloudTab) {
-      console.log("  ✗ Tab assente su Cloud; confronto campi impossibile.");
-      continue;
+    if (!dcTab) {
+      tabStatus = "EXTRA_IN_CLOUD";
+    } else if (!cloudTab) {
+      tabStatus = "MISSING_IN_CLOUD";
+    } else if (dcTab.position !== cloudTab.position) {
+      tabStatus = "ORDER_DIFFERENT";
+    } else {
+      tabStatus = "MATCH";
     }
 
-    const dcNames = dcTab.fields.map(({ name }) => normalize(name));
-    const cloudNames = cloudTab.fields.map(({ name }) => normalize(name));
+    rows.push({
+      ...base,
+      section: "tab",
+      tab: tabName,
+      item: tabName,
+      dcId: dcTab?.tab.id ?? "",
+      cloudId: cloudTab?.tab.id ?? "",
+      dcPosition: dcTab?.position ?? "",
+      cloudPosition: cloudTab?.position ?? "",
+      status: tabStatus,
+      details: "",
+    });
 
-    const missingFields = dcTab.fields.filter(
-      ({ name }) => !cloudNames.includes(normalize(name)),
+    const dcFields = dcTab?.fields ?? [];
+    const cloudFields = cloudTab?.fields ?? [];
+
+    const dcFieldMap = new Map(
+      dcFields.map((field, index) => [
+        normalize(field.name),
+        { field, position: index + 1 },
+      ]),
     );
 
-    const extraFields = cloudTab.fields.filter(
-      ({ name }) => !dcNames.includes(normalize(name)),
+    const cloudFieldMap = new Map(
+      cloudFields.map((field, index) => [
+        normalize(field.name),
+        { field, position: index + 1 },
+      ]),
     );
 
-    console.log(
-      "  DC:",
-      dcTab.fields.map(({ name }) => name).join(" → ") || "(nessun campo)",
-    );
+    const allFieldKeys = [
+      ...new Set([...dcFieldMap.keys(), ...cloudFieldMap.keys()]),
+    ];
 
-    console.log(
-      "  Cloud:",
-      cloudTab.fields.map(({ name }) => name).join(" → ") || "(nessun campo)",
-    );
+    for (const fieldKey of allFieldKeys) {
+      const dcField = dcFieldMap.get(fieldKey);
+      const cloudField = cloudFieldMap.get(fieldKey);
 
-    console.log(
-      "  Mancanti su Cloud:",
-      missingFields.map(({ name, id }) => `${name} [${id}]`),
-    );
+      let status: string;
 
-    console.log(
-      "  Aggiuntivi su Cloud:",
-      extraFields.map(({ name, id }) => `${name} [${id}]`),
-    );
-
-    if (missingFields.length === 0 && extraFields.length === 0) {
-      if (dcNames.join("|") === cloudNames.join("|")) {
-        console.log("  ✓ Campi presenti nello stesso ordine.");
+      if (!dcTab) {
+        status = "TAB_EXTRA_IN_CLOUD";
+      } else if (!cloudTab) {
+        status = "TAB_MISSING_IN_CLOUD";
+      } else if (!dcField) {
+        status = "EXTRA_IN_CLOUD";
+      } else if (!cloudField) {
+        status = "MISSING_IN_CLOUD";
+      } else if (dcField.position !== cloudField.position) {
+        status = "ORDER_DIFFERENT";
       } else {
-        console.log("  ! Stessi nomi di campo, ma ordine differente.");
-
-        // Segnala anche i campi che occupano posizioni diverse.
-        for (let i = 0; i < dcNames.length; i++) {
-          if (dcNames[i] !== cloudNames[i]) {
-            console.log(
-              `    Posizione ${i + 1}: DC="${dcTab.fields[i].name}", ` +
-                `Cloud="${cloudTab.fields[i].name}"`,
-            );
-          }
-        }
+        status = "MATCH";
       }
+
+      rows.push({
+        ...base,
+        section: "field",
+        tab: tabName,
+        item: dcField?.field.name ?? cloudField?.field.name ?? fieldKey,
+        dcId: dcField?.field.id ?? "",
+        cloudId: cloudField?.field.id ?? "",
+        dcPosition: dcField?.position ?? "",
+        cloudPosition: cloudField?.position ?? "",
+        status,
+        details: "",
+      });
     }
   }
 
-  console.log("\n========== FINE CONFRONTO ==========");
+  return rows;
+}
+
+function printComparison(rows: ComparisonRow[]): void {
+  console.log("\n========== CONFRONTO ==========");
+  console.table(
+    rows.map((row) => ({
+      sezione: row.section,
+      tab: row.tab,
+      elemento: row.item,
+      DC: row.dcPosition,
+      Cloud: row.cloudPosition,
+      stato: row.status,
+    })),
+  );
+}
+
+function csvEscape(value: string | number): string {
+  const text = String(value);
+
+  if (/[",\r\n;]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+async function writeComparisonCsv(
+  filePath: string,
+  rows: ComparisonRow[],
+): Promise<void> {
+  const columns: (keyof ComparisonRow)[] = [
+    "screen",
+    "dcScreenId",
+    "cloudScreenId",
+    "section",
+    "tab",
+    "item",
+    "dcId",
+    "cloudId",
+    "dcPosition",
+    "cloudPosition",
+    "status",
+    "details",
+  ];
+
+  const lines = [
+    columns.join(","),
+    ...rows.map((row) =>
+      columns.map((column) => csvEscape(row[column])).join(","),
+    ),
+  ];
+
+  await writeFile(filePath, "\uFEFF" + lines.join("\r\n"), "utf8");
+
+  console.log(`CSV creato: ${filePath}`);
+  console.log(`Righe esportate: ${rows.length}`);
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const screenIndex = args.indexOf("--screen");
-  const screenName =
-    screenIndex >= 0 ? args[screenIndex + 1]?.trim() : undefined;
 
-  if (!screenName || screenName.startsWith("--")) {
-    throw new Error('Uso: npm run sync -- --screen "Nome esatto dello screen"');
+  function getArg(name: string): string | undefined {
+    const index = args.indexOf(name);
+    return index >= 0 ? args[index + 1] : undefined;
   }
 
-  console.log(`Screen richiesto: "${screenName}"`);
-  console.log("Modalità: sola lettura.\n");
+  const screenName = getArg("--screen")?.trim();
+  const screensFile = getArg("--screens-file")?.trim();
+  const csvFile = getArg("--csv")?.trim() || "jira-screen-comparison.csv";
 
-  let dcSnapshot: ScreenSnapshot | undefined;
-  let cloudSnapshot: ScreenSnapshot | undefined;
-
-  try {
-    console.log("[DC] Connessione e lettura screen...");
-    dcSnapshot = await getScreenSnapshot("dc", screenName);
-    console.log("[DC] OK");
-  } catch (error) {
-    console.error("[DC] ERRORE:", error);
-    if (error instanceof Error && error.cause) {
-      console.error("[DC] Causa:", error.cause);
-    }
+  if (screensFile && screenName) {
+    throw new Error("Usa --screen oppure --screens-file, non entrambi.");
   }
 
-  try {
-    console.log("\n[Cloud] Connessione e lettura screen...");
-    cloudSnapshot = await getScreenSnapshot("cloud", screenName);
-    console.log("[Cloud] OK");
-  } catch (error) {
-    console.error("[Cloud] ERRORE:", error);
-    if (error instanceof Error && error.cause) {
-      console.error("[Cloud] Causa:", error.cause);
-    }
-  }
-
-  if (dcSnapshot) printSnapshot(dcSnapshot);
-  if (cloudSnapshot) printSnapshot(cloudSnapshot);
-
-  if (dcSnapshot && cloudSnapshot) {
-    compareSnapshots(dcSnapshot, cloudSnapshot);
-  } else {
-    console.error(
-      "\nConfronto non eseguito: almeno uno dei due ambienti non è stato letto.",
+  if (!screensFile && !screenName) {
+    throw new Error(
+      'Uso singolo: npm run sync -- --screen "Nome screen"\n' +
+        "Uso batch: npm run sync -- --screens-file screens.txt --csv risultati.csv",
     );
+  }
+
+  let screenNames: string[];
+
+  if (screensFile) {
+    const content = await readFile(screensFile, "utf8");
+
+    screenNames = content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+
+    if (screenNames.length === 0) {
+      throw new Error(`Nessuno screen trovato nel file ${screensFile}`);
+    }
+
+    console.log(`Screen caricati dal file: ${screenNames.length}`);
+  } else {
+    screenNames = [screenName!];
+  }
+
+  const allRows: ComparisonRow[] = [];
+
+  for (const name of screenNames) {
+    console.log(`\n========== ${name} ==========`);
+
+    let dcSnapshot: ScreenSnapshot | undefined;
+    let cloudSnapshot: ScreenSnapshot | undefined;
+    let dcError = "";
+    let cloudError = "";
+
+    try {
+      console.log("[DC] Lettura screen...");
+      dcSnapshot = await getScreenSnapshot("dc", name);
+      console.log("[DC] OK");
+    } catch (error) {
+      dcError = error instanceof Error ? error.message : String(error);
+      console.error("[DC] ERRORE:", dcError);
+    }
+
+    try {
+      console.log("[Cloud] Lettura screen...");
+      cloudSnapshot = await getScreenSnapshot("cloud", name);
+      console.log("[Cloud] OK");
+    } catch (error) {
+      cloudError = error instanceof Error ? error.message : String(error);
+      console.error("[Cloud] ERRORE:", cloudError);
+    }
+
+    if (dcSnapshot && cloudSnapshot) {
+      printSnapshot(dcSnapshot);
+      printSnapshot(cloudSnapshot);
+
+      const rows = buildComparisonRows(name, dcSnapshot, cloudSnapshot);
+
+      printComparison(rows);
+      allRows.push(...rows);
+    } else {
+      const base = {
+        screen: name,
+        dcScreenId: dcSnapshot?.screen.id ?? "",
+        cloudScreenId: cloudSnapshot?.screen.id ?? "",
+        section: "error" as const,
+        tab: "",
+        item: name,
+        dcId: "",
+        cloudId: "",
+        dcPosition: "",
+        cloudPosition: "",
+      };
+
+      if (!dcSnapshot) {
+        allRows.push({
+          ...base,
+          status: "DC_ERROR",
+          details: dcError,
+        });
+      }
+
+      if (!cloudSnapshot) {
+        allRows.push({
+          ...base,
+          status: "CLOUD_ERROR",
+          details: cloudError,
+        });
+      }
+    }
+  }
+
+  if (screensFile) {
+    await writeComparisonCsv(csvFile, allRows);
+  }
+
+  const failed = allRows.filter(
+    (row) => row.status === "DC_ERROR" || row.status === "CLOUD_ERROR",
+  );
+
+  console.log("\n========== RIEPILOGO ==========");
+  console.log(`Screen richiesti: ${screenNames.length}`);
+  console.log(`Righe risultato: ${allRows.length}`);
+  console.log(`Errori di lettura: ${failed.length}`);
+
+  if (screensFile) {
+    console.log(`File CSV: ${csvFile}`);
+  }
+
+  if (failed.length > 0) {
     process.exitCode = 1;
   }
 }
