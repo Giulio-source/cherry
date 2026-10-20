@@ -165,14 +165,6 @@ async function getAllScreens(
     `\n[${environment.toUpperCase()}] Screen trovati: ${screens.length}`,
   );
 
-  console.table(
-    screens.map((screen) => ({
-      id: screen.id,
-      name: screen.name,
-      description: screen.description ?? "",
-    })),
-  );
-
   return screens;
 }
 
