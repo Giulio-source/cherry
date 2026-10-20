@@ -46,6 +46,11 @@ function buildHeaders(environment: "dc" | "cloud") {
     Accept: "application/json",
   };
 
+  if (environment === "dc") {
+    headers["User-Agent"] =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/117.0.0.0 Safari/537.36";
+  }
+
   if (environment === "cloud") {
     const email = requiredEnv("CLOUD_EMAIL");
     const token = requiredEnv("CLOUD_API_TOKEN");
