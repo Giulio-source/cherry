@@ -117,21 +117,38 @@ async function getAllScreens(
   const pageSize = 100;
   let startAt = 0;
 
+  console.log(
+    `\n[${environment.toUpperCase()}] Recupero di tutti gli screen...`,
+  );
+
   while (true) {
+    const endpoint = `/screens?startAt=${startAt}&maxResults=${pageSize}`;
+
+    console.log(`[${environment.toUpperCase()}] GET ${endpoint}`);
+
     const result = await jiraGet<JiraScreen[] | Page<JiraScreen>>(
       environment,
-      `/screens?startAt=${startAt}&maxResults=${pageSize}`,
+      endpoint,
     );
 
-    // Alcune versioni restituiscono un array, altre una pagina.
     if (Array.isArray(result)) {
+      console.log(
+        `[${environment.toUpperCase()}] Risposta array: ${result.length} screen`,
+      );
+
       screens.push(...result);
       break;
     }
 
     const values = result.values ?? [];
-    screens.push(...values);
 
+    console.log(
+      `[${environment.toUpperCase()}] Pagina: startAt=${startAt}, ` +
+        `ricevuti=${values.length}, totale=${result.total ?? "sconosciuto"}, ` +
+        `isLast=${result.isLast ?? "sconosciuto"}`,
+    );
+
+    screens.push(...values);
     startAt += values.length;
 
     if (
@@ -142,6 +159,18 @@ async function getAllScreens(
       break;
     }
   }
+
+  console.log(
+    `\n[${environment.toUpperCase()}] Screen trovati: ${screens.length}`,
+  );
+
+  console.table(
+    screens.map((screen) => ({
+      id: screen.id,
+      name: screen.name,
+      description: screen.description ?? "",
+    })),
+  );
 
   return screens;
 }
