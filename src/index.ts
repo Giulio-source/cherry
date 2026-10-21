@@ -69,11 +69,13 @@ type TabReorderPlan = {
   targetFields: JiraField[];
 };
 
-const dcDispatcher = new Agent({
-  connect: {
-    rejectUnauthorized: false,
-  },
-});
+// const dcDispatcher = new Agent({
+//   connect: {
+//     rejectUnauthorized: false,
+//   },
+// });
+
+const dcDispatcher = new Agent();
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -153,53 +155,122 @@ async function getAllScreens(
   const screens: JiraScreen[] = [];
   const pageSize = 100;
   let startAt = 0;
+  const tag = `[${environment.toUpperCase()}]`;
 
-  console.log(
-    `\n[${environment.toUpperCase()}] Recupero di tutti gli screen...`,
-  );
+  console.log(`\n${tag} Recupero di tutti gli screen...`);
 
-  while (true) {
-    const endpoint = `/screens?startAt=${startAt}&maxResults=${pageSize}`;
+  // Mostra anche le cause annidate degli errori di rete/TLS.
+  function logErrorDetails(error: unknown, depth = 0): void {
+    const indent = "  ".repeat(depth);
 
-    console.log(`[${environment.toUpperCase()}] GET ${endpoint}`);
+    if (error instanceof Error) {
+      console.error(`${indent}Nome: ${error.name}`);
+      console.error(`${indent}Messaggio: ${error.message}`);
 
-    const result = await jiraGet<JiraScreen[] | Page<JiraScreen>>(
-      environment,
-      endpoint,
-    );
+      const details = error as Error & {
+        code?: string;
+        cause?: unknown;
+        errno?: string | number;
+        syscall?: string;
+        hostname?: string;
+      };
 
-    if (Array.isArray(result)) {
-      console.log(
-        `[${environment.toUpperCase()}] Risposta array: ${result.length} screen`,
-      );
+      if (details.code) {
+        console.error(`${indent}Codice: ${details.code}`);
+      }
 
-      screens.push(...result);
-      break;
-    }
+      if (details.errno !== undefined) {
+        console.error(`${indent}Errno: ${details.errno}`);
+      }
 
-    const values = result.values ?? result.screens ?? [];
+      if (details.syscall) {
+        console.error(`${indent}Syscall: ${details.syscall}`);
+      }
 
-    console.log(
-      `[${environment.toUpperCase()}] Pagina: startAt=${startAt}, ` +
-        `ricevuti=${values.length}, totale=${result.total ?? "sconosciuto"}, ` +
-        `isLast=${result.isLast ?? "sconosciuto"}`,
-    );
+      if (details.hostname) {
+        console.error(`${indent}Hostname: ${details.hostname}`);
+      }
 
-    screens.push(...values);
-    startAt += values.length;
+      if (depth === 0 && error.stack) {
+        console.error(`${indent}Stack:\n${error.stack}`);
+      }
 
-    if (
-      result.isLast === true ||
-      values.length === 0 ||
-      (result.total !== undefined && startAt >= result.total)
-    ) {
-      break;
+      if (details.cause !== undefined) {
+        console.error(`${indent}Causa:`);
+        logErrorDetails(details.cause, depth + 1);
+      }
+    } else {
+      console.error(`${indent}Dettaglio:`, error);
     }
   }
 
-  console.log(
-    `\n[${environment.toUpperCase()}] Screen trovati: ${screens.length}`,
-  );
+  console.log(`${tag} Base URL: ${baseUrl(environment)}`);
+  console.log(`${tag} API version: ${apiVersion(environment)}`);
+
+  while (true) {
+    const endpoint = `/screens?startAt=${startAt}&maxResults=${pageSize}`;
+    const pageNumber = Math.floor(startAt / pageSize) + 1;
+    const startedAt = Date.now();
+
+    console.log(`\n${tag} Pagina ${pageNumber}`);
+    console.log(`${tag} GET ${endpoint}`);
+
+    try {
+      const result = await jiraGet<JiraScreen[] | Page<JiraScreen>>(
+        environment,
+        endpoint,
+      );
+
+      console.log(`${tag} Risposta ricevuta in ${Date.now() - startedAt} ms`);
+
+      if (Array.isArray(result)) {
+        console.log(`${tag} Formato array; screen ricevuti: ${result.length}`);
+
+        screens.push(...result);
+        break;
+      }
+
+      console.log(
+        `${tag} Proprietà risposta: ${Object.keys(result ?? {}).join(", ")}`,
+      );
+
+      const values = result.values ?? result.screens ?? [];
+
+      console.log(
+        `${tag} Pagina: startAt=${startAt}, ` +
+          `ricevuti=${values.length}, ` +
+          `totale=${result.total ?? "sconosciuto"}, ` +
+          `isLast=${result.isLast ?? "sconosciuto"}`,
+      );
+
+      screens.push(...values);
+      startAt += values.length;
+
+      if (
+        result.isLast === true ||
+        values.length === 0 ||
+        (result.total !== undefined && startAt >= result.total)
+      ) {
+        break;
+      }
+    } catch (error: unknown) {
+      console.error(`\n${tag} ERRORE durante il recupero degli screen`);
+      console.error(`${tag} Endpoint: ${endpoint}`);
+      console.error(`${tag} URL base: ${baseUrl(environment)}`);
+      console.error(
+        `${tag} Tempo prima dell'errore: ${Date.now() - startedAt} ms`,
+      );
+      console.error(`${tag} Screen già recuperati: ${screens.length}`);
+      console.error(`${tag} Dettagli dell'errore:`);
+
+      logErrorDetails(error);
+
+      // Rilancia l'errore originale per non nascondere la causa.
+      throw error;
+    }
+  }
+
+  console.log(`\n${tag} Screen trovati: ${screens.length}`);
 
   return screens;
 }
@@ -753,7 +824,7 @@ async function main(): Promise<void> {
   if (screensFile && screenName) {
     throw new Error("Usa --screen oppure --screens-file, non entrambi.");
   }
-  
+
   if (reorderScreenName) {
     if (getArg("--screen") || getArg("--screens-file")) {
       throw new Error(
