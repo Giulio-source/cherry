@@ -1,81 +1,14 @@
 import "dotenv/config";
-import { Agent, fetch } from "undici";
 import { writeFile, readFile } from "node:fs/promises";
-
-type JiraScreen = {
-  id: number;
-  name: string;
-  description?: string;
-};
-
-type JiraTab = {
-  id: number;
-  name: string;
-};
-
-type JiraField = {
-  id: string;
-  name: string;
-};
-
-type ScreenSnapshot = {
-  environment: string;
-  screen: JiraScreen;
-  tabs: Array<{
-    tab: JiraTab;
-    fields: JiraField[];
-  }>;
-};
-
-type ComparisonRow = {
-  screen: string;
-  dcScreenId: number | string;
-  cloudScreenId: number | string;
-  section: "screen" | "tab" | "field" | "error";
-  tab: string;
-  item: string;
-  dcId: string | number;
-  cloudId: string | number;
-  dcPosition: number | string;
-  cloudPosition: number | string;
-  status: string;
-  details: string;
-};
-
-type Page<T> = {
-  values?: T[];
-  screens?: T[];
-  total?: number;
-  isLast?: boolean;
-};
-
-type ScreenReportRow = {
-  screen: string;
-  dcScreenId: number | string;
-  cloudScreenId: number | string;
-  status: string;
-  missingTabs: string[];
-  extraTabs: string[];
-  missingFields: string[];
-  extraFields: string[];
-  orderDifferences: string[];
-  errors: string[];
-};
-
-type TabReorderPlan = {
-  tabName: string;
-  tabId: number;
-  currentFields: JiraField[];
-  targetFields: JiraField[];
-};
-
-// const dcDispatcher = new Agent({
-//   connect: {
-//     rejectUnauthorized: false,
-//   },
-// });
-
-const dcDispatcher = new Agent();
+import {
+  JiraField,
+  JiraScreen,
+  JiraTab,
+  Page,
+  ReorderReportRow,
+  ScreenSnapshot,
+  TabReorderPlan,
+} from "./types.js";
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -91,13 +24,6 @@ function buildHeaders(environment: "dc" | "cloud") {
   const headers: Record<string, string> = {
     Accept: "application/json",
   };
-
-  if (environment === "dc") {
-    //   "X-Atlassian-Token": "no-check",
-    // "User-Agent": "curl/7.81.0"
-    headers["X-Atlassian-Token"] = "no-check";
-    headers["User-Agent"] = "curl/7.81.0";
-  }
 
   if (environment === "cloud") {
     const email = requiredEnv("CLOUD_EMAIL");
@@ -134,7 +60,6 @@ async function jiraGet<T>(
   const response = await fetch(url, {
     method: "GET",
     headers: buildHeaders(environment),
-    ...(environment === "dc" ? { dispatcher: dcDispatcher } : {}),
   });
 
   if (!response.ok) {
@@ -334,172 +259,6 @@ async function getScreenSnapshot(
   };
 }
 
-function printSnapshot(snapshot: ScreenSnapshot): void {
-  console.log(`\n========== ${snapshot.environment} ==========`);
-
-  console.log(
-    JSON.stringify(
-      {
-        screen: snapshot.screen,
-        tabs: snapshot.tabs.map(({ tab, fields }) => ({
-          tab,
-          fields: fields.map((field, index) => ({
-            position: index + 1,
-            ...field,
-          })),
-        })),
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-function buildComparisonRows(
-  screenName: string,
-  dc: ScreenSnapshot,
-  cloud: ScreenSnapshot,
-): ComparisonRow[] {
-  const rows: ComparisonRow[] = [];
-
-  const base = {
-    screen: screenName,
-    dcScreenId: dc.screen.id,
-    cloudScreenId: cloud.screen.id,
-  };
-
-  rows.push({
-    ...base,
-    section: "screen",
-    tab: "",
-    item: screenName,
-    dcId: dc.screen.id,
-    cloudId: cloud.screen.id,
-    dcPosition: "",
-    cloudPosition: "",
-    status: "FOUND_BOTH",
-    details: "Screen trovato in entrambi gli ambienti",
-  });
-
-  const dcTabMap = new Map(
-    dc.tabs.map((entry, index) => [
-      normalize(entry.tab.name),
-      { ...entry, position: index + 1 },
-    ]),
-  );
-
-  const cloudTabMap = new Map(
-    cloud.tabs.map((entry, index) => [
-      normalize(entry.tab.name),
-      { ...entry, position: index + 1 },
-    ]),
-  );
-
-  const allTabKeys = [...new Set([...dcTabMap.keys(), ...cloudTabMap.keys()])];
-
-  for (const key of allTabKeys) {
-    const dcTab = dcTabMap.get(key);
-    const cloudTab = cloudTabMap.get(key);
-    const tabName = dcTab?.tab.name ?? cloudTab?.tab.name ?? key;
-
-    let tabStatus: string;
-
-    if (!dcTab) {
-      tabStatus = "EXTRA_IN_CLOUD";
-    } else if (!cloudTab) {
-      tabStatus = "MISSING_IN_CLOUD";
-    } else if (dcTab.position !== cloudTab.position) {
-      tabStatus = "ORDER_DIFFERENT";
-    } else {
-      tabStatus = "MATCH";
-    }
-
-    rows.push({
-      ...base,
-      section: "tab",
-      tab: tabName,
-      item: tabName,
-      dcId: dcTab?.tab.id ?? "",
-      cloudId: cloudTab?.tab.id ?? "",
-      dcPosition: dcTab?.position ?? "",
-      cloudPosition: cloudTab?.position ?? "",
-      status: tabStatus,
-      details: "",
-    });
-
-    const dcFields = dcTab?.fields ?? [];
-    const cloudFields = cloudTab?.fields ?? [];
-
-    const dcFieldMap = new Map(
-      dcFields.map((field, index) => [
-        normalize(field.name),
-        { field, position: index + 1 },
-      ]),
-    );
-
-    const cloudFieldMap = new Map(
-      cloudFields.map((field, index) => [
-        normalize(field.name),
-        { field, position: index + 1 },
-      ]),
-    );
-
-    const allFieldKeys = [
-      ...new Set([...dcFieldMap.keys(), ...cloudFieldMap.keys()]),
-    ];
-
-    for (const fieldKey of allFieldKeys) {
-      const dcField = dcFieldMap.get(fieldKey);
-      const cloudField = cloudFieldMap.get(fieldKey);
-
-      let status: string;
-
-      if (!dcTab) {
-        status = "TAB_EXTRA_IN_CLOUD";
-      } else if (!cloudTab) {
-        status = "TAB_MISSING_IN_CLOUD";
-      } else if (!dcField) {
-        status = "EXTRA_IN_CLOUD";
-      } else if (!cloudField) {
-        status = "MISSING_IN_CLOUD";
-      } else if (dcField.position !== cloudField.position) {
-        status = "ORDER_DIFFERENT";
-      } else {
-        status = "MATCH";
-      }
-
-      rows.push({
-        ...base,
-        section: "field",
-        tab: tabName,
-        item: dcField?.field.name ?? cloudField?.field.name ?? fieldKey,
-        dcId: dcField?.field.id ?? "",
-        cloudId: cloudField?.field.id ?? "",
-        dcPosition: dcField?.position ?? "",
-        cloudPosition: cloudField?.position ?? "",
-        status,
-        details: "",
-      });
-    }
-  }
-
-  return rows;
-}
-
-function printComparison(rows: ComparisonRow[]): void {
-  console.log("\n========== CONFRONTO ==========");
-  console.table(
-    rows.map((row) => ({
-      sezione: row.section,
-      tab: row.tab,
-      elemento: row.item,
-      DC: row.dcPosition,
-      Cloud: row.cloudPosition,
-      stato: row.status,
-    })),
-  );
-}
-
 function csvEscape(value: string | number): string {
   const text = String(value);
 
@@ -508,133 +267,6 @@ function csvEscape(value: string | number): string {
   }
 
   return text;
-}
-
-async function writeComparisonCsv(
-  filePath: string,
-  rows: ScreenReportRow[],
-): Promise<void> {
-  const columns: (keyof ScreenReportRow)[] = [
-    "screen",
-    "dcScreenId",
-    "cloudScreenId",
-    "status",
-    "missingTabs",
-    "extraTabs",
-    "missingFields",
-    "extraFields",
-    "orderDifferences",
-    "errors",
-  ];
-
-  const lines = [
-    columns.join(","),
-    ...rows.map((row) =>
-      columns
-        .map((column) => {
-          const value = row[column];
-          const formatted = Array.isArray(value)
-            ? value.length > 0
-              ? value.join(" | ")
-              : "—"
-            : value === ""
-              ? "—"
-              : String(value);
-
-          return csvEscape(formatted);
-        })
-        .join(","),
-    ),
-  ];
-
-  await writeFile(filePath, "\uFEFF" + lines.join("\r\n"), "utf8");
-
-  console.log(`CSV creato: ${filePath}`);
-  console.log(`Screen esportati: ${rows.length}`);
-}
-
-function buildScreenReport(
-  screenName: string,
-  dc: ScreenSnapshot | undefined,
-  cloud: ScreenSnapshot | undefined,
-  errors: string[] = [],
-): ScreenReportRow {
-  const report: ScreenReportRow = {
-    screen: screenName,
-    dcScreenId: dc?.screen.id ?? "",
-    cloudScreenId: cloud?.screen.id ?? "",
-    status: "OK",
-    missingTabs: [],
-    extraTabs: [],
-    missingFields: [],
-    extraFields: [],
-    orderDifferences: [],
-    errors,
-  };
-
-  if (!dc || !cloud) {
-    report.status = "ERRORE";
-    return report;
-  }
-
-  const dcTabNames = dc.tabs.map(({ tab }) => normalize(tab.name));
-  const cloudTabNames = cloud.tabs.map(({ tab }) => normalize(tab.name));
-
-  report.missingTabs = dc.tabs
-    .filter(({ tab }) => !cloudTabNames.includes(normalize(tab.name)))
-    .map(({ tab }) => tab.name);
-
-  report.extraTabs = cloud.tabs
-    .filter(({ tab }) => !dcTabNames.includes(normalize(tab.name)))
-    .map(({ tab }) => tab.name);
-
-  if (dcTabNames.join("|") !== cloudTabNames.join("|")) {
-    report.orderDifferences.push(
-      `Ordine tab: DC [${dc.tabs.map(({ tab }) => tab.name).join(" → ")}] / ` +
-        `Cloud [${cloud.tabs.map(({ tab }) => tab.name).join(" → ")}]`,
-    );
-  }
-
-  for (const dcTab of dc.tabs) {
-    const cloudTab = cloud.tabs.find(
-      ({ tab }) => normalize(tab.name) === normalize(dcTab.tab.name),
-    );
-
-    if (!cloudTab) continue;
-
-    const dcNames = dcTab.fields.map(({ name }) => normalize(name));
-    const cloudNames = cloudTab.fields.map(({ name }) => normalize(name));
-
-    report.missingFields.push(
-      ...dcTab.fields
-        .filter(({ name }) => !cloudNames.includes(normalize(name)))
-        .map(({ name }) => `${name} (tab: ${dcTab.tab.name})`),
-    );
-
-    report.extraFields.push(
-      ...cloudTab.fields
-        .filter(({ name }) => !dcNames.includes(normalize(name)))
-        .map(({ name }) => `${name} (tab: ${cloudTab.tab.name})`),
-    );
-
-    if (dcNames.join("|") !== cloudNames.join("|")) {
-      report.orderDifferences.push(
-        `Campi "${dcTab.tab.name}": DC [${dcTab.fields.map(({ name }) => name).join(" → ")}] / ` +
-          `Cloud [${cloudTab.fields.map(({ name }) => name).join(" → ")}]`,
-      );
-    }
-  }
-
-  const hasDifferences =
-    report.missingTabs.length > 0 ||
-    report.extraTabs.length > 0 ||
-    report.missingFields.length > 0 ||
-    report.extraFields.length > 0 ||
-    report.orderDifferences.length > 0;
-
-  report.status = hasDifferences ? "DIFFERENZE" : "OK";
-
-  return report;
 }
 
 async function jiraPostCloud(endpoint: string, body: unknown): Promise<void> {
@@ -661,6 +293,61 @@ async function jiraPostCloud(endpoint: string, body: unknown): Promise<void> {
   }
 }
 
+function formatPlanOrder(plans: TabReorderPlan[]): string {
+  if (plans.length === 0) return "Nessuna tab confrontabile";
+
+  return plans
+    .map((plan) => {
+      const extraIds = new Set(plan.extraCloudFields.map((field) => field.id));
+
+      const formatFields = (fields: JiraField[]) =>
+        fields
+          .map((field) => `${field.name}${extraIds.has(field.id) ? "*" : ""}`)
+          .join(" → ") || "(nessun campo)";
+
+      return `${plan.tabName}: ${formatFields(plan.currentFields)}`;
+    })
+    .join("\n");
+}
+
+function formatTargetOrder(plans: TabReorderPlan[]): string {
+  return (
+    plans
+      .map((plan) => {
+        const extraIds = new Set(
+          plan.extraCloudFields.map((field) => field.id),
+        );
+
+        const fields = plan.targetFields
+          .map((field) => `${field.name}${extraIds.has(field.id) ? "*" : ""}`)
+          .join(" → ");
+
+        return `${plan.tabName}: ${fields || "(nessun campo)"}`;
+      })
+      .join("\n") || "Nessuna tab confrontabile"
+  );
+}
+
+function getExtraCloudFieldSummary(plans: TabReorderPlan[]): string {
+  return plans
+    .flatMap((plan) =>
+      plan.extraCloudFields.map((field) => `${plan.tabName}: ${field.name}*`),
+    )
+    .join(" | ");
+}
+
+function hasOrderDifferences(plans: TabReorderPlan[]): boolean {
+  return plans.some((plan) => {
+    const current = plan.currentFields.map((field) => field.id);
+    const target = plan.targetFields.map((field) => field.id);
+
+    return (
+      current.length !== target.length ||
+      current.some((id, index) => id !== target[index])
+    );
+  });
+}
+
 function buildTabReorderPlans(
   dc: ScreenSnapshot,
   cloud: ScreenSnapshot,
@@ -672,7 +359,6 @@ function buildTabReorderPlans(
       ({ tab }) => normalize(tab.name) === normalize(dcTab.tab.name),
     );
 
-    // Non modifichiamo tab che non esistono su entrambi gli ambienti.
     if (!cloudTab) {
       console.log(`[SKIP] Tab "${dcTab.tab.name}" non presente su Cloud.`);
       continue;
@@ -681,7 +367,6 @@ function buildTabReorderPlans(
     const usedCloudFieldIds = new Set<string>();
     const commonFields: JiraField[] = [];
 
-    // Ordine DC: inseriamo i campi corrispondenti che esistono su Cloud.
     for (const dcField of dcTab.fields) {
       const cloudField = cloudTab.fields.find(
         (field) =>
@@ -695,9 +380,7 @@ function buildTabReorderPlans(
       }
     }
 
-    // I campi esclusivi di Cloud vengono mantenuti in fondo,
-    // conservando tra loro l'ordine attuale.
-    const cloudOnlyFields = cloudTab.fields.filter(
+    const extraCloudFields = cloudTab.fields.filter(
       (field) => !usedCloudFieldIds.has(field.id),
     );
 
@@ -705,7 +388,8 @@ function buildTabReorderPlans(
       tabName: cloudTab.tab.name,
       tabId: cloudTab.tab.id,
       currentFields: cloudTab.fields,
-      targetFields: [...commonFields, ...cloudOnlyFields],
+      targetFields: [...commonFields, ...extraCloudFields],
+      extraCloudFields,
     });
   }
 
@@ -715,97 +399,154 @@ function buildTabReorderPlans(
 async function reorderScreenOnCloud(
   screenName: string,
   apply: boolean,
-): Promise<void> {
-  console.log(`Screen: "${screenName}"`);
-  console.log(`Modalità: ${apply ? "APPLICAZIONE" : "ANTEPRIMA"}`);
+): Promise<ReorderReportRow> {
+  const report: ReorderReportRow = {
+    screen: screenName,
+    dcScreenId: "",
+    cloudScreenId: "",
+    status: "ERRORE",
+    extraCloudFieldCount: 0,
+    extraCloudFields: "",
+    currentOrder: "",
+    targetOrder: "",
+    finalOrder: "",
+    details: "",
+  };
 
-  const dc = await getScreenSnapshot("dc", screenName);
-  const cloud = await getScreenSnapshot("cloud", screenName);
+  try {
+    console.log(`\n========== ${screenName} ==========`);
+    console.log(`Modalità: ${apply ? "APPLICAZIONE" : "ANTEPRIMA"}`);
 
-  const plans = buildTabReorderPlans(dc, cloud);
+    const dc = await getScreenSnapshot("dc", screenName);
+    const cloud = await getScreenSnapshot("cloud", screenName);
 
-  let moveCount = 0;
+    report.dcScreenId = dc.screen.id;
+    report.cloudScreenId = cloud.screen.id;
 
-  for (const plan of plans) {
-    const currentIds = plan.currentFields.map((field) => field.id);
-    const targetIds = plan.targetFields.map((field) => field.id);
+    const plans = buildTabReorderPlans(dc, cloud);
+    const needsReorder = hasOrderDifferences(plans);
 
-    const changed =
-      currentIds.length !== targetIds.length ||
-      currentIds.some((id, index) => id !== targetIds[index]);
+    report.extraCloudFieldCount = plans.reduce(
+      (total, plan) => total + plan.extraCloudFields.length,
+      0,
+    );
 
-    console.log(`\nTab: "${plan.tabName}"`);
+    report.extraCloudFields = getExtraCloudFieldSummary(plans);
+    report.currentOrder = formatPlanOrder(plans);
+    report.targetOrder = formatTargetOrder(plans);
 
-    if (!changed) {
-      console.log("  ✓ Ordine già corretto.");
-      continue;
+    console.log("\nOrdine attuale (* = campo solo Cloud):");
+    console.log(report.currentOrder);
+
+    console.log("\nOrdine target:");
+    console.log(report.targetOrder);
+
+    console.log(`\nCampi extra Cloud: ${report.extraCloudFieldCount}`);
+
+    if (!needsReorder) {
+      report.status = "OK";
+      report.details = "L'ordine è già corretto.";
+      report.finalOrder = report.currentOrder;
+
+      console.log("✓ Ordine già corretto.");
+      return report;
     }
-
-    console.log("  Ordine attuale:");
-    console.log(
-      "   ",
-      plan.currentFields.map((field) => field.name).join(" → "),
-    );
-
-    console.log("  Ordine desiderato:");
-    console.log(
-      "   ",
-      plan.targetFields.map((field) => field.name).join(" → "),
-    );
 
     if (!apply) {
-      console.log("  Anteprima: nessuna modifica eseguita.");
-      continue;
+      report.status = "DA_RIORDINARE";
+      report.details = "Anteprima: nessuna modifica eseguita.";
+
+      console.log("Anteprima completata: nessuna modifica eseguita.");
+      return report;
     }
 
-    // Invertendo la sequenza e portando ogni campo in testa,
-    // otteniamo l'ordine finale desiderato.
-    for (const field of [...plan.targetFields].reverse()) {
-      const endpoint =
-        `/screens/${cloud.screen.id}/tabs/${plan.tabId}` +
-        `/fields/${encodeURIComponent(field.id)}/move`;
+    let moveCount = 0;
 
-      await jiraPostCloud(endpoint, {
-        position: "First",
-      });
+    for (const plan of plans) {
+      const currentIds = plan.currentFields.map((field) => field.id);
+      const targetIds = plan.targetFields.map((field) => field.id);
 
-      moveCount++;
-      console.log(`  Spostato: ${field.name}`);
+      const changed =
+        currentIds.length !== targetIds.length ||
+        currentIds.some((id, index) => id !== targetIds[index]);
+
+      if (!changed) continue;
+
+      // Sposta in testa partendo dall'ultimo elemento target.
+      for (const field of [...plan.targetFields].reverse()) {
+        const endpoint =
+          `/screens/${cloud.screen.id}/tabs/${plan.tabId}` +
+          `/fields/${encodeURIComponent(field.id)}/move`;
+
+        await jiraPostCloud(endpoint, {
+          position: "First",
+        });
+
+        moveCount++;
+        console.log(
+          `[Cloud] Spostato "${field.name}" nella tab "${plan.tabName}"`,
+        );
+      }
     }
+
+    report.details = `Spostamenti richiesti: ${moveCount}. Verifica in corso.`;
+
+    const verified = await getScreenSnapshot("cloud", screenName);
+    const verificationPlans = buildTabReorderPlans(dc, verified);
+
+    report.finalOrder = formatPlanOrder(verificationPlans);
+
+    const verificationFailed = hasOrderDifferences(verificationPlans);
+
+    if (verificationFailed) {
+      report.status = "VERIFICA_FALLITA";
+      report.details =
+        `Spostamenti richiesti: ${moveCount}. ` +
+        "L'ordine finale non corrisponde a quello target.";
+    } else {
+      report.status = "RIORDINATO";
+      report.details = `Riordino completato e verificato. Spostamenti: ${moveCount}.`;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+
+    report.status = "ERRORE";
+    report.details = message;
+
+    console.error(`[ERRORE] ${screenName}: ${message}`);
   }
 
-  if (!apply) {
-    console.log(
-      "\nAnteprima completata. Per applicare le modifiche, aggiungi --apply.",
-    );
-    return;
-  }
+  return report;
+}
 
-  console.log(`\nSpostamenti richiesti: ${moveCount}`);
-  console.log("Verifica dell'ordine su Cloud...");
+async function writeReorderCsv(
+  filePath: string,
+  rows: ReorderReportRow[],
+): Promise<void> {
+  const columns: (keyof ReorderReportRow)[] = [
+    "screen",
+    "dcScreenId",
+    "cloudScreenId",
+    "status",
+    "extraCloudFieldCount",
+    "extraCloudFields",
+    "currentOrder",
+    "targetOrder",
+    "finalOrder",
+    "details",
+  ];
 
-  const verified = await getScreenSnapshot("cloud", screenName);
-  const verificationPlans = buildTabReorderPlans(dc, verified);
+  const lines = [
+    columns.join(","),
+    ...rows.map((row) =>
+      columns.map((column) => csvEscape(row[column])).join(","),
+    ),
+  ];
 
-  const differences = verificationPlans.filter((plan) => {
-    const expected = plan.targetFields.map((field) => field.id);
-    const actual = plan.currentFields.map((field) => field.id);
+  await writeFile(filePath, "\uFEFF" + lines.join("\r\n"), "utf8");
 
-    return (
-      expected.length !== actual.length ||
-      expected.some((id, index) => id !== actual[index])
-    );
-  });
-
-  if (differences.length > 0) {
-    console.error(
-      "ATTENZIONE: alcune tab non corrispondono ancora all'ordine desiderato:",
-      differences.map((plan) => plan.tabName),
-    );
-    process.exitCode = 1;
-  } else {
-    console.log("✓ Verifica completata: ordine dei campi corretto.");
-  }
+  console.log(`\nCSV creato: ${filePath}`);
+  console.log(`Screen riportati: ${rows.length}`);
 }
 
 async function main(): Promise<void> {
@@ -816,121 +557,57 @@ async function main(): Promise<void> {
     return index >= 0 ? args[index + 1] : undefined;
   }
 
-  const reorderScreenName = getArg("--reorder-screen")?.trim();
-  const screenName = getArg("--screen")?.trim();
-  const screensFile = getArg("--screens-file")?.trim();
-  const csvFile = getArg("--csv")?.trim() || "jira-screen-comparison.csv";
+  const screensFile = getArg("--reorder-screens-file")?.trim();
 
-  if (screensFile && screenName) {
-    throw new Error("Usa --screen oppure --screens-file, non entrambi.");
-  }
-
-  if (reorderScreenName) {
-    if (getArg("--screen") || getArg("--screens-file")) {
-      throw new Error(
-        "--reorder-screen non può essere combinato con --screen o --screens-file.",
-      );
-    }
-
-    await reorderScreenOnCloud(reorderScreenName, args.includes("--apply"));
-
-    return;
-  }
-
-  if (!screensFile && !screenName) {
+  if (!screensFile || screensFile.startsWith("--")) {
     throw new Error(
-      'Uso singolo: npm run sync -- --screen "Nome screen"\n' +
-        "Uso batch: npm run sync -- --screens-file screens.txt --csv risultati.csv",
+      "Uso: npm run sync -- --reorder-screens-file screens.txt [--csv report.csv] [--apply]",
     );
   }
 
-  let screenNames: string[];
+  const apply = args.includes("--apply");
+  const csvArg = getArg("--csv");
+  const csvFile =
+    csvArg && !csvArg.startsWith("--") ? csvArg : "reorder-report.csv";
 
-  if (screensFile) {
-    const content = await readFile(screensFile, "utf8");
+  const content = await readFile(screensFile, "utf8");
+  const screenNames = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
 
-    screenNames = content
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"));
-
-    if (screenNames.length === 0) {
-      throw new Error(`Nessuno screen trovato nel file ${screensFile}`);
-    }
-
-    console.log(`Screen caricati dal file: ${screenNames.length}`);
-  } else {
-    screenNames = [screenName!];
+  if (screenNames.length === 0) {
+    throw new Error(`Nessuno screen trovato nel file ${screensFile}`);
   }
 
-  const allRows: ScreenReportRow[] = [];
+  console.log(`File input: ${screensFile}`);
+  console.log(`Screen da elaborare: ${screenNames.length}`);
+  console.log(`Modalità: ${apply ? "APPLY" : "ANTEPRIMA"}`);
+
+  const reports: ReorderReportRow[] = [];
 
   for (const name of screenNames) {
-    console.log(`\n========== ${name} ==========`);
-
-    let dcSnapshot: ScreenSnapshot | undefined;
-    let cloudSnapshot: ScreenSnapshot | undefined;
-    let dcError = "";
-    let cloudError = "";
-
-    try {
-      console.log("[DC] Lettura screen...");
-      dcSnapshot = await getScreenSnapshot("dc", name);
-      console.log("[DC] OK");
-    } catch (error) {
-      dcError = error instanceof Error ? error.message : String(error);
-      console.error("[DC] ERRORE:", dcError);
-    }
-
-    try {
-      console.log("[Cloud] Lettura screen...");
-      cloudSnapshot = await getScreenSnapshot("cloud", name);
-      console.log("[Cloud] OK");
-    } catch (error) {
-      cloudError = error instanceof Error ? error.message : String(error);
-      console.error("[Cloud] ERRORE:", cloudError);
-    }
-
-    if (dcSnapshot && cloudSnapshot) {
-      printSnapshot(dcSnapshot);
-      printSnapshot(cloudSnapshot);
-
-      const comparisonRows = buildComparisonRows(
-        name,
-        dcSnapshot,
-        cloudSnapshot,
-      );
-
-      printComparison(comparisonRows);
-
-      allRows.push(buildScreenReport(name, dcSnapshot, cloudSnapshot));
-    } else {
-      const errors = [
-        ...(dcError ? [`DC: ${dcError}`] : []),
-        ...(cloudError ? [`Cloud: ${cloudError}`] : []),
-      ];
-
-      allRows.push(buildScreenReport(name, dcSnapshot, cloudSnapshot, errors));
-    }
+    reports.push(await reorderScreenOnCloud(name, apply));
   }
 
-  if (screensFile) {
-    await writeComparisonCsv(csvFile, allRows);
-  }
+  await writeReorderCsv(csvFile, reports);
 
-  const failed = allRows.filter((row) => row.status === "ERRORE");
-
-  console.log(`Screen elaborati: ${allRows.length}`);
+  console.log("\n========== RIEPILOGO RIORDINO ==========");
+  console.log(`Screen elaborati: ${reports.length}`);
   console.log(
-    `Screen con differenze: ${
-      allRows.filter((row) => row.status === "DIFFERENZE").length
-    }`,
+    `Da riordinare: ${reports.filter((row) => row.status === "DA_RIORDINARE").length}`,
   );
-  console.log(`Screen con errori: ${failed.length}`);
+  console.log(
+    `Riordinati: ${reports.filter((row) => row.status === "RIORDINATO").length}`,
+  );
+  console.log(
+    `Campi extra Cloud: ${reports.reduce((sum, row) => sum + row.extraCloudFieldCount, 0)}`,
+  );
 
-  if (screensFile) {
-    console.log(`File CSV: ${csvFile}`);
-  }
+  const failed = reports.filter(
+    (row) => row.status === "ERRORE" || row.status === "VERIFICA_FALLITA",
+  );
+  console.log(`Errori: ${failed.length}`);
 
   if (failed.length > 0) {
     process.exitCode = 1;
