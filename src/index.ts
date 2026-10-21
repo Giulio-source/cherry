@@ -62,6 +62,13 @@ type ScreenReportRow = {
   errors: string[];
 };
 
+type TabReorderPlan = {
+  tabName: string;
+  tabId: number;
+  currentFields: JiraField[];
+  targetFields: JiraField[];
+};
+
 const dcDispatcher = new Agent({
   connect: {
     rejectUnauthorized: false,
@@ -559,6 +566,177 @@ function buildScreenReport(
   return report;
 }
 
+async function jiraPostCloud(endpoint: string, body: unknown): Promise<void> {
+  const url = `${baseUrl("cloud")}/rest/api/${apiVersion("cloud")}` + endpoint;
+
+  const headers = {
+    ...buildHeaders("cloud"),
+    "Content-Type": "application/json",
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+
+    throw new Error(
+      `[CLOUD] POST ${endpoint} → HTTP ${response.status}: ` +
+        responseBody.slice(0, 500),
+    );
+  }
+}
+
+function buildTabReorderPlans(
+  dc: ScreenSnapshot,
+  cloud: ScreenSnapshot,
+): TabReorderPlan[] {
+  const plans: TabReorderPlan[] = [];
+
+  for (const dcTab of dc.tabs) {
+    const cloudTab = cloud.tabs.find(
+      ({ tab }) => normalize(tab.name) === normalize(dcTab.tab.name),
+    );
+
+    // Non modifichiamo tab che non esistono su entrambi gli ambienti.
+    if (!cloudTab) {
+      console.log(`[SKIP] Tab "${dcTab.tab.name}" non presente su Cloud.`);
+      continue;
+    }
+
+    const usedCloudFieldIds = new Set<string>();
+    const commonFields: JiraField[] = [];
+
+    // Ordine DC: inseriamo i campi corrispondenti che esistono su Cloud.
+    for (const dcField of dcTab.fields) {
+      const cloudField = cloudTab.fields.find(
+        (field) =>
+          normalize(field.name) === normalize(dcField.name) &&
+          !usedCloudFieldIds.has(field.id),
+      );
+
+      if (cloudField) {
+        commonFields.push(cloudField);
+        usedCloudFieldIds.add(cloudField.id);
+      }
+    }
+
+    // I campi esclusivi di Cloud vengono mantenuti in fondo,
+    // conservando tra loro l'ordine attuale.
+    const cloudOnlyFields = cloudTab.fields.filter(
+      (field) => !usedCloudFieldIds.has(field.id),
+    );
+
+    plans.push({
+      tabName: cloudTab.tab.name,
+      tabId: cloudTab.tab.id,
+      currentFields: cloudTab.fields,
+      targetFields: [...commonFields, ...cloudOnlyFields],
+    });
+  }
+
+  return plans;
+}
+
+async function reorderScreenOnCloud(
+  screenName: string,
+  apply: boolean,
+): Promise<void> {
+  console.log(`Screen: "${screenName}"`);
+  console.log(`Modalità: ${apply ? "APPLICAZIONE" : "ANTEPRIMA"}`);
+
+  const dc = await getScreenSnapshot("dc", screenName);
+  const cloud = await getScreenSnapshot("cloud", screenName);
+
+  const plans = buildTabReorderPlans(dc, cloud);
+
+  let moveCount = 0;
+
+  for (const plan of plans) {
+    const currentIds = plan.currentFields.map((field) => field.id);
+    const targetIds = plan.targetFields.map((field) => field.id);
+
+    const changed =
+      currentIds.length !== targetIds.length ||
+      currentIds.some((id, index) => id !== targetIds[index]);
+
+    console.log(`\nTab: "${plan.tabName}"`);
+
+    if (!changed) {
+      console.log("  ✓ Ordine già corretto.");
+      continue;
+    }
+
+    console.log("  Ordine attuale:");
+    console.log(
+      "   ",
+      plan.currentFields.map((field) => field.name).join(" → "),
+    );
+
+    console.log("  Ordine desiderato:");
+    console.log(
+      "   ",
+      plan.targetFields.map((field) => field.name).join(" → "),
+    );
+
+    if (!apply) {
+      console.log("  Anteprima: nessuna modifica eseguita.");
+      continue;
+    }
+
+    // Invertendo la sequenza e portando ogni campo in testa,
+    // otteniamo l'ordine finale desiderato.
+    for (const field of [...plan.targetFields].reverse()) {
+      const endpoint =
+        `/screens/${cloud.screen.id}/tabs/${plan.tabId}` +
+        `/fields/${encodeURIComponent(field.id)}/move`;
+
+      await jiraPostCloud(endpoint, {
+        position: "First",
+      });
+
+      moveCount++;
+      console.log(`  Spostato: ${field.name}`);
+    }
+  }
+
+  if (!apply) {
+    console.log(
+      "\nAnteprima completata. Per applicare le modifiche, aggiungi --apply.",
+    );
+    return;
+  }
+
+  console.log(`\nSpostamenti richiesti: ${moveCount}`);
+  console.log("Verifica dell'ordine su Cloud...");
+
+  const verified = await getScreenSnapshot("cloud", screenName);
+  const verificationPlans = buildTabReorderPlans(dc, verified);
+
+  const differences = verificationPlans.filter((plan) => {
+    const expected = plan.targetFields.map((field) => field.id);
+    const actual = plan.currentFields.map((field) => field.id);
+
+    return (
+      expected.length !== actual.length ||
+      expected.some((id, index) => id !== actual[index])
+    );
+  });
+
+  if (differences.length > 0) {
+    console.error(
+      "ATTENZIONE: alcune tab non corrispondono ancora all'ordine desiderato:",
+      differences.map((plan) => plan.tabName),
+    );
+    process.exitCode = 1;
+  } else {
+    console.log("✓ Verifica completata: ordine dei campi corretto.");
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -567,12 +745,25 @@ async function main(): Promise<void> {
     return index >= 0 ? args[index + 1] : undefined;
   }
 
+  const reorderScreenName = getArg("--reorder-screen")?.trim();
   const screenName = getArg("--screen")?.trim();
   const screensFile = getArg("--screens-file")?.trim();
   const csvFile = getArg("--csv")?.trim() || "jira-screen-comparison.csv";
 
   if (screensFile && screenName) {
     throw new Error("Usa --screen oppure --screens-file, non entrambi.");
+  }
+  
+  if (reorderScreenName) {
+    if (getArg("--screen") || getArg("--screens-file")) {
+      throw new Error(
+        "--reorder-screen non può essere combinato con --screen o --screens-file.",
+      );
+    }
+
+    await reorderScreenOnCloud(reorderScreenName, args.includes("--apply"));
+
+    return;
   }
 
   if (!screensFile && !screenName) {
