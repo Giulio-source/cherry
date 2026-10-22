@@ -1,5 +1,6 @@
 import "dotenv/config";
-import { writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   JiraField,
   JiraScreen,
@@ -18,6 +19,19 @@ function requiredEnv(name: string): string {
   }
 
   return value.replace(/\/+$/, "");
+}
+
+function formatTimestamp(date: Date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+
+  return (
+    `${date.getFullYear()}-` +
+    `${pad(date.getMonth() + 1)}-` +
+    `${pad(date.getDate())}_` +
+    `${pad(date.getHours())}-` +
+    `${pad(date.getMinutes())}-` +
+    `${pad(date.getSeconds())}`
+  );
 }
 
 function buildHeaders(environment: "dc" | "cloud") {
@@ -204,12 +218,11 @@ function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
-async function findScreen(
+function findScreen(
   environment: "dc" | "cloud",
   screenName: string,
-): Promise<JiraScreen> {
-  const screens = await getAllScreens(environment);
-
+  screens: JiraScreen[],
+): JiraScreen {
   const matches = screens.filter(
     (screen) => normalize(screen.name) === normalize(screenName),
   );
@@ -233,8 +246,9 @@ async function findScreen(
 async function getScreenSnapshot(
   environment: "dc" | "cloud",
   screenName: string,
+  screens: JiraScreen[],
 ): Promise<ScreenSnapshot> {
-  const screen = await findScreen(environment, screenName);
+  const screen = findScreen(environment, screenName, screens);
 
   const tabs = await jiraGet<JiraTab[]>(
     environment,
@@ -303,9 +317,9 @@ function formatPlanOrder(plans: TabReorderPlan[]): string {
       const formatFields = (fields: JiraField[]) =>
         fields
           .map((field) => `${field.name}${extraIds.has(field.id) ? "*" : ""}`)
-          .join(" → ") || "(nessun campo)";
+          .join("\n") || "(nessun campo)";
 
-      return `${plan.tabName}: ${formatFields(plan.currentFields)}`;
+      return `${plan.tabName.toLocaleUpperCase()}:\n${formatFields(plan.currentFields)}`;
     })
     .join("\n");
 }
@@ -320,9 +334,9 @@ function formatTargetOrder(plans: TabReorderPlan[]): string {
 
         const fields = plan.targetFields
           .map((field) => `${field.name}${extraIds.has(field.id) ? "*" : ""}`)
-          .join(" → ");
+          .join("\n");
 
-        return `${plan.tabName}: ${fields || "(nessun campo)"}`;
+        return `${plan.tabName.toLocaleUpperCase()}:\n${fields || "(nessun campo)"}`;
       })
       .join("\n") || "Nessuna tab confrontabile"
   );
@@ -331,9 +345,11 @@ function formatTargetOrder(plans: TabReorderPlan[]): string {
 function getExtraCloudFieldSummary(plans: TabReorderPlan[]): string {
   return plans
     .flatMap((plan) =>
-      plan.extraCloudFields.map((field) => `${plan.tabName}: ${field.name}*`),
+      plan.extraCloudFields.map(
+        (field) => `${plan.tabName.toLocaleUpperCase()}: ${field.name}*`,
+      ),
     )
-    .join(" | ");
+    .join("\n");
 }
 
 function hasOrderDifferences(plans: TabReorderPlan[]): boolean {
@@ -399,6 +415,8 @@ function buildTabReorderPlans(
 async function reorderScreenOnCloud(
   screenName: string,
   apply: boolean,
+  dcScreens: JiraScreen[],
+  cloudScreens: JiraScreen[],
 ): Promise<ReorderReportRow> {
   const report: ReorderReportRow = {
     screen: screenName,
@@ -417,8 +435,8 @@ async function reorderScreenOnCloud(
     console.log(`\n========== ${screenName} ==========`);
     console.log(`Modalità: ${apply ? "APPLICAZIONE" : "ANTEPRIMA"}`);
 
-    const dc = await getScreenSnapshot("dc", screenName);
-    const cloud = await getScreenSnapshot("cloud", screenName);
+    const dc = await getScreenSnapshot("dc", screenName, dcScreens);
+    const cloud = await getScreenSnapshot("cloud", screenName, cloudScreens);
 
     report.dcScreenId = dc.screen.id;
     report.cloudScreenId = cloud.screen.id;
@@ -491,7 +509,7 @@ async function reorderScreenOnCloud(
 
     report.details = `Spostamenti richiesti: ${moveCount}. Verifica in corso.`;
 
-    const verified = await getScreenSnapshot("cloud", screenName);
+    const verified = await getScreenSnapshot("cloud", screenName, cloudScreens);
     const verificationPlans = buildTabReorderPlans(dc, verified);
 
     report.finalOrder = formatPlanOrder(verificationPlans);
@@ -523,23 +541,23 @@ async function writeReorderCsv(
   filePath: string,
   rows: ReorderReportRow[],
 ): Promise<void> {
-  const columns: (keyof ReorderReportRow)[] = [
-    "screen",
-    "dcScreenId",
-    "cloudScreenId",
-    "status",
-    "extraCloudFieldCount",
-    "extraCloudFields",
-    "currentOrder",
-    "targetOrder",
-    "finalOrder",
-    "details",
+  const columns: { key: keyof ReorderReportRow; label: string }[] = [
+    { key: "screen", label: "Nome schermata" },
+    { key: "dcScreenId", label: "ID schermata Jira Data Center" },
+    { key: "cloudScreenId", label: "ID schermata Jira Cloud" },
+    { key: "status", label: "Esito elaborazione" },
+    { key: "extraCloudFieldCount", label: "Numero campi aggiuntivi su Cloud" },
+    { key: "extraCloudFields", label: "Campi aggiuntivi su Cloud" },
+    { key: "currentOrder", label: "Ordine iniziale dei campi su Cloud" },
+    { key: "targetOrder", label: "Ordine previsto dei campi" },
+    { key: "finalOrder", label: "Ordine finale dei campi su Cloud" },
+    { key: "details", label: "Dettaglio elaborazione" },
   ];
 
   const lines = [
-    columns.join(","),
+    columns.map(({ label }) => csvEscape(label)).join(";"),
     ...rows.map((row) =>
-      columns.map((column) => csvEscape(row[column])).join(","),
+      columns.map(({ key }) => csvEscape(row[key])).join(";"),
     ),
   ];
 
@@ -566,9 +584,6 @@ async function main(): Promise<void> {
   }
 
   const apply = args.includes("--apply");
-  const csvArg = getArg("--csv");
-  const csvFile =
-    csvArg && !csvArg.startsWith("--") ? csvArg : "reorder-report.csv";
 
   const content = await readFile(screensFile, "utf8");
   const screenNames = content
@@ -584,10 +599,23 @@ async function main(): Promise<void> {
   console.log(`Screen da elaborare: ${screenNames.length}`);
   console.log(`Modalità: ${apply ? "APPLY" : "ANTEPRIMA"}`);
 
+  const exportDir = "exports";
+
+  await mkdir(exportDir, { recursive: true });
+
+  const csvFile = join(exportDir, `reorder-report-${formatTimestamp()}.csv`);
+
   const reports: ReorderReportRow[] = [];
 
+  const [dcScreens, cloudScreens] = await Promise.all([
+    getAllScreens("dc"),
+    getAllScreens("cloud"),
+  ]);
+
   for (const name of screenNames) {
-    reports.push(await reorderScreenOnCloud(name, apply));
+    reports.push(
+      await reorderScreenOnCloud(name, apply, dcScreens, cloudScreens),
+    );
   }
 
   await writeReorderCsv(csvFile, reports);

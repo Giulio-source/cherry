@@ -1,3 +1,6 @@
 node_modules/
 .env
 dist/
+exports/
+screens.txt
+.DS_Store
