@@ -1,35 +1,38 @@
 # Jira Screen Comparator
 
-CLI in TypeScript per confrontare la configurazione degli screen tra
+CLI in TypeScript per confrontare l'ordine dei campi degli screen tra
 Jira Data Center e Jira Cloud e, su richiesta esplicita, riordinare i
-campi degli screen su Cloud secondo l'ordine di Data Center.
+campi su Cloud seguendo l'ordine di Data Center.
 
 ## Funzionalità
 
--   Cerca uno screen tramite il nome.
--   Recupera screen, tab e campi tramite API REST.
--   Confronta presenza e ordine di tab e campi.
--   Stampa gli snapshot e i confronti in console.
--   Elabora una lista di screen da file e genera un CSV con **una riga
-    per screen**.
--   Registra nel report gli errori di lettura.
--   Offre un comando separato per pianificare il riordino dei campi su
-    Cloud.
--   Applica il riordino su Cloud soltanto se viene specificato
-    `--apply`.
+-   Legge da file l'elenco degli screen da elaborare, uno per riga.
+-   Recupera gli screen di Data Center e Cloud e li associa tramite il
+    nome normalizzato.
+-   Confronta l'ordine dei campi nelle tab corrispondenti.
+-   Produce un report CSV con una riga per ogni screen elaborato.
+-   Registra nel report gli esiti, gli eventuali campi aggiuntivi
+    presenti su Cloud e gli ordini iniziale, desiderato e finale.
+-   In modalità anteprima non modifica Jira Cloud.
+-   Applica il riordino soltanto se viene specificato `--apply`.
+-   Recupera l'elenco degli screen di ciascun ambiente una sola volta
+    all'avvio, riutilizzandolo per tutte le schermate del file.
+-   Dopo l'applicazione delle modifiche, rilegge i dettagli dello screen
+    per verificare l'ordine risultante.
 
-Il comando di confronto è pensato per la sola lettura. Il comando
-`--reorder-screen` può invece modificare la configurazione di Jira Cloud
-quando viene usato con `--apply`.
+**Attenzione:** il comando con `--apply` modifica realmente la
+configurazione degli screen su Jira Cloud. Data Center viene utilizzato
+come riferimento e non viene modificato.
 
 ## Requisiti
 
--   Node.js con supporto a `fetch`.
+-   Una versione di Node.js compatibile con il progetto e con `fetch`.
 -   npm.
 -   Accesso alle API REST di Jira Data Center e Jira Cloud.
--   Credenziali o token autorizzati a leggere gli screen.
--   Permessi sufficienti per modificare la configurazione degli screen
-    su Cloud se si usa `--apply`.
+-   Credenziali autorizzate a leggere gli screen in entrambi gli
+    ambienti.
+-   Permessi sufficienti per modificare gli screen su Cloud se si
+    utilizza `--apply`.
 -   Connettività verso Jira Data Center, inclusa l'eventuale VPN
     aziendale.
 
@@ -39,11 +42,10 @@ Dalla cartella del progetto:
 
 ``` bash
 npm install
-npm install undici
 ```
 
-Verifica che `package.json` contenga uno script `sync` compatibile con
-il progetto. Per esempio, se usi `tsx`:
+Il progetto deve avere uno script `sync` in `package.json` che esegua il
+file TypeScript. Ad esempio, con `tsx`:
 
 ``` json
 {
@@ -53,22 +55,22 @@ il progetto. Per esempio, se usi `tsx`:
 }
 ```
 
-Se il progetto usa già un altro runner TypeScript, mantieni quello
-configurato.
+Se il progetto utilizza già un runner TypeScript diverso, mantieni la
+configurazione esistente.
 
 ## Configurazione delle variabili d'ambiente
 
 Crea un file `.env` nella root del progetto. Non committarlo e non
 condividere token o password.
 
-Esempio indicativo:
+Esempio:
 
 ``` dotenv
 # Jira Data Center
 DC_BASE_URL=https://jira-uat.example.internal
 DC_PAT=your-data-center-personal-access-token
 
-# In alternativa al PAT, se supportato dalla propria istanza:
+# In alternativa al PAT, se supportato dall'istanza:
 # DC_USERNAME=your-username
 # DC_PASSWORD=your-password
 
@@ -80,156 +82,145 @@ CLOUD_API_TOKEN=your-cloud-api-token
 
 ### Autenticazione
 
--   **Data Center:** se `DC_PAT` è valorizzato, viene usato come Bearer
-    token. Altrimenti vengono usati `DC_USERNAME` e `DC_PASSWORD` in
-    Basic authentication.
--   **Cloud:** viene usata la Basic authentication con email Atlassian e
-    API token.
+-   **Data Center:** se `DC_PAT` è valorizzato, viene utilizzato come
+    Bearer token. In alternativa, il progetto può usare `DC_USERNAME` e
+    `DC_PASSWORD` con Basic authentication, se questa modalità è
+    configurata nel codice.
+-   **Cloud:** viene utilizzata la Basic authentication con email
+    Atlassian e API token.
 
-Usa URL e credenziali forniti dall'amministratore Jira. L'utente API
-deve poter leggere gli screen e i relativi campi. Per applicare il
-riordino, l'utente Cloud deve inoltre disporre dei permessi necessari a
-modificare la configurazione degli screen.
+Usa gli URL e le credenziali forniti dall'amministratore Jira. L'utente
+API deve poter leggere gli screen e i relativi campi; per applicare il
+riordino deve anche avere i permessi necessari su Cloud.
 
-## Comandi
+## Utilizzo
 
-### 1. Confrontare un singolo screen
+### 1. Preparare la lista degli screen
 
-``` bash
-npm run sync -- --screen "Nome esatto dello screen"
-```
-
-Recupera lo screen da entrambi gli ambienti, stampa gli snapshot e
-mostra il confronto in console. Questo comando non modifica la
-configurazione Jira e non genera il CSV batch.
-
-### 2. Confrontare una lista di screen e generare un CSV
-
-Crea un file di testo, ad esempio `screens.txt`, con uno screen per
-riga:
+Crea un file di testo, ad esempio `screens.txt`, con il nome di uno
+screen per riga:
 
 ``` text
-# Screen relativi agli incident
-ICT: View Incident Jira Work Management Screen
-ICT: Edit Incident Screen
-ICT: Create Incident Screen
+# Screen da riordinare
+ICT: Create Minaccia Cyber
+ICT: View Minaccia Cyber
 ```
 
-Sono ignorate le righe vuote e le righe che iniziano con `#`.
+Le righe vuote e quelle che iniziano con `#` vengono ignorate.
 
-Esegui:
+Il nome deve corrispondere allo screen presente in entrambi gli
+ambienti. Gli ID possono essere diversi tra Data Center e Cloud.
+
+### 2. Eseguire l'anteprima
 
 ``` bash
-npm run sync -- --screens-file screens.txt --csv risultati.csv
+npm run sync -- --reorder-screens-file screens.txt
 ```
 
-Se ometti `--csv`, il nome predefinito è `jira-screen-comparison.csv`.
+Senza `--apply`, lo script confronta gli ordini, calcola il piano
+desiderato e mostra i risultati nei log, senza inviare richieste di
+modifica a Jira Cloud.
 
-Il percorso del CSV è relativo alla directory da cui viene lanciato il
-comando, a meno che non venga indicato un percorso assoluto.
-
-### 3. Riordinare i campi di uno screen su Cloud
-
-Il comando confronta l'ordine dei campi tra Data Center e Cloud e
-prepara un piano di riordino.
-
-**Anteprima senza modifiche:**
+### 3. Applicare il riordino
 
 ``` bash
-npm run sync -- --reorder-screen "ICT: View Incident Jira Work Management Screen"
+npm run sync -- --reorder-screens-file screens.txt --apply
 ```
 
-**Applicazione delle modifiche su Cloud:**
+Con `--apply`, lo script invia a Jira Cloud le richieste necessarie per
+riordinare i campi. Al termine rilegge i dettagli degli screen per
+verificare il risultato.
 
-``` bash
-npm run sync -- --reorder-screen "ICT: View Incident Jira Work Management Screen" --apply
+### 4. Report CSV
+
+A ogni esecuzione viene generato automaticamente un CSV nella directory
+`exports/`. Il nome include data e ora di esecuzione, per esempio:
+
+``` text
+exports/reorder-report-2026-10-22_10-15-30.csv
 ```
 
-Senza `--apply`, il comando mostra gli ordini attuale e desiderato senza
-eseguire chiamate di modifica. Con `--apply`, invia le richieste di
-spostamento a Jira Cloud e poi rilegge lo screen per verificare il
-risultato.
+Non è necessario specificare il percorso del report tramite un argomento
+CLI. La directory `exports/` viene creata automaticamente se non esiste.
 
-#### Regole del riordino
+Il CSV usa il punto e virgola come separatore, UTF-8 con BOM per
+migliorare la compatibilità con Excel e intestazioni in italiano.
 
-Per ogni tab presente in entrambi gli ambienti:
+## Regole del riordino
 
-1.  I campi presenti sia in Data Center sia in Cloud vengono ordinati
-    secondo la sequenza di Data Center.
-2.  I campi presenti solo in Data Center vengono ignorati perché non
+Per ogni tab presente sia in Data Center sia in Cloud:
+
+1.  I campi presenti in entrambi gli ambienti vengono ordinati secondo
+    la sequenza di Data Center.
+2.  I campi presenti solo in Data Center vengono ignorati, perché non
     possono essere ordinati su Cloud se non esistono lì.
-3.  I campi presenti solo in Cloud vengono mantenuti e spostati in fondo
-    alla tab, preservando il loro ordine relativo corrente.
+3.  I campi presenti solo in Cloud vengono mantenuti in fondo alla tab,
+    preservando il loro ordine relativo corrente.
 4.  Le tab non vengono create, eliminate o riordinate.
 5.  Le tab presenti soltanto in Data Center vengono ignorate.
-6.  Il comando modifica soltanto Cloud; Data Center viene usato come
+6.  Viene modificato soltanto Jira Cloud; Data Center è usato come
     riferimento.
 
-L'associazione dei campi tra gli ambienti si basa sul nome normalizzato,
-non sull'ID, perché gli ID possono differire. Se nella stessa tab ci
-sono più campi con lo stesso nome, il confronto potrebbe essere ambiguo.
+L'associazione dei campi si basa sul nome normalizzato, non sull'ID,
+perché gli ID possono differire tra ambienti. Se nella stessa tab sono
+presenti più campi con lo stesso nome, l'associazione potrebbe essere
+ambigua.
 
-#### Precauzioni
+## Colonne del report CSV
 
--   Esegui prima l'anteprima e controlla attentamente il piano.
--   Prova inizialmente su uno screen non critico.
--   Il comando con `--apply` modifica realmente la configurazione di
-    Cloud.
--   Se una richiesta fallisce a metà, alcuni campi potrebbero essere già
-    stati spostati. Riesegui l'anteprima per verificare lo stato
-    effettivo prima di riprovare.
--   Il comando non è una transazione atomica: non garantisce un rollback
-    automatico in caso di errore.
-
-## CSV: una riga per screen
-
-Il CSV batch contiene una riga per ogni screen presente nel file di
-input, anche se non è stato possibile leggerlo da uno dei due ambienti.
+Il report contiene una riga per ogni screen richiesto. Le colonne sono:
 
   -----------------------------------------------------------------------
   Colonna                             Significato
   ----------------------------------- -----------------------------------
-  `screen`                            Nome dello screen richiesto
+  Nome schermata                      Nome dello screen richiesto.
 
-  `dcScreenId`                        ID dello screen in Data Center, se
-                                      trovato
+  ID schermata Jira Data Center       ID dello screen in Data Center, se
+                                      trovato.
 
-  `cloudScreenId`                     ID dello screen in Cloud, se
-                                      trovato
+  ID schermata Jira Cloud             ID dello screen in Cloud, se
+                                      trovato.
 
-  `status`                            `OK`, `DIFFERENZE` oppure `ERRORE`
+  Esito elaborazione                  Esito sintetico dell'elaborazione,
+                                      ad esempio completata, già corretta
+                                      o errore, secondo i valori
+                                      registrati dallo script.
 
-  `missingTabs`                       Tab presenti in DC ma assenti in
-                                      Cloud
+  Numero campi aggiuntivi su Cloud    Numero di campi presenti su Cloud
+                                      ma non in Data Center.
 
-  `extraTabs`                         Tab presenti in Cloud ma assenti in
-                                      DC
+  Campi aggiuntivi su Cloud           Elenco dei campi aggiuntivi
+                                      rilevati su Cloud.
 
-  `missingFields`                     Campi presenti in DC ma assenti in
-                                      Cloud, con il nome della tab
+  Ordine iniziale dei campi su Cloud  Ordine dei campi rilevato prima del
+                                      riordino.
 
-  `extraFields`                       Campi presenti in Cloud ma assenti
-                                      in DC, con il nome della tab
+  Ordine previsto dei campi           Ordine obiettivo calcolato a
+                                      partire da Data Center, mantenendo
+                                      in fondo i campi aggiuntivi di
+                                      Cloud.
 
-  `orderDifferences`                  Differenze nell'ordine delle tab o
-                                      dei campi
+  Ordine finale dei campi su Cloud    Ordine rilevato al termine
+                                      dell'elaborazione o della verifica.
 
-  `errors`                            Errori di lettura in uno o entrambi
-                                      gli ambienti
+  Dettaglio elaborazione              Informazioni aggiuntive sull'esito
+                                      o sugli eventuali errori.
   -----------------------------------------------------------------------
 
-Gli elenchi all'interno delle colonne sono separati da `|`. Il CSV usa
-UTF-8 con BOM per migliorare la compatibilità con Excel.
+Gli elenchi all'interno delle celle possono contenere più elementi. Se
+una schermata non può essere letta o elaborata, controlla il dettaglio e
+i log dell'esecuzione.
 
-### Interpretazione degli stati
+## Precauzioni
 
--   **`OK`**: non sono state rilevate differenze in presenza e ordine
-    delle tab e dei campi.
--   **`DIFFERENZE`**: è stata rilevata almeno una differenza.
--   **`ERRORE`**: non è stato possibile recuperare lo screen da almeno
-    uno degli ambienti.
-
-La posizione dei campi è confrontata all'interno della rispettiva tab.
+-   Esegui prima l'anteprima senza `--apply` e controlla attentamente
+    gli ordini previsti.
+-   Prova inizialmente su uno screen non critico.
+-   Il riordino non è una transazione atomica: se una richiesta fallisce
+    a metà, alcuni campi potrebbero essere già stati spostati.
+-   In caso di errore, riesegui l'anteprima per verificare lo stato
+    effettivo prima di riprovare.
+-   Il comando non garantisce un rollback automatico.
 
 ## Diagnostica
 
@@ -238,27 +229,25 @@ La posizione dei campi è confrontata all'interno della rispettiva tab.
 Controlla:
 
 1.  Che `DC_BASE_URL` e `CLOUD_BASE_URL` puntino alle istanze corrette.
-2.  Che il nome sia quello dello screen, non quello di un progetto o di
-    un issue type.
+2.  Che il nome nel file corrisponda allo screen e non al nome di un
+    progetto o di un issue type.
 3.  Che l'utente o il token abbiano i permessi necessari.
-4.  I log delle chiamate `/rest/api/2/screens` in Data Center e
-    `/rest/api/3/screens` in Cloud.
+4.  Che gli endpoint REST siano raggiungibili e restituiscano
+    correttamente le pagine degli screen.
 
-Se la risposta dichiara un `total` maggiore di zero ma non contiene
-elementi, registra le proprietà presenti nel JSON e verifica la
-struttura di paginazione della versione Jira in uso. Non assumere che
-tutte le istanze restituiscano lo stesso formato.
+Lo script recupera l'elenco degli screen una sola volta per ambiente
+all'avvio. Se un nome non viene trovato o non è univoco, verifica i nomi
+restituiti da Jira e i log.
 
-### Errore TLS in Data Center
+### Errori TLS o di connessione verso Data Center
 
-La configurazione attuale può usare `rejectUnauthorized: false` per le
-richieste Data Center. Questo disabilita la verifica del certificato TLS
-e riduce la sicurezza della connessione.
+Verifica che la VPN aziendale sia attiva, che il DNS risolva
+correttamente l'hostname e che il certificato TLS del server sia valido
+e corrisponda all'hostname utilizzato. Se l'errore persiste, chiedi al
+team IT di verificare il certificato e la catena di certificazione.
 
-È un workaround temporaneo, da usare soltanto in un ambiente fidato. La
-soluzione raccomandata è correggere il certificato, installare la CA
-aziendale appropriata oppure utilizzare l'hostname corretto indicato dal
-team IT. Non disabilitare globalmente la verifica TLS di Node.js.
+Non disabilitare la verifica del certificato TLS come soluzione
+permanente.
 
 ### Errori di autenticazione o permessi
 
@@ -272,25 +261,22 @@ team IT. Non disabilitare globalmente la verifica TLS di Node.js.
 
 ## Struttura del progetto
 
-La logica principale si trova in `src/index.ts`. Le responsabilità sono
-separate in funzioni per:
+La logica principale si trova in `src/index.ts`. Le responsabilità
+includono:
 
--   costruire gli header e le URL API;
--   recuperare gli screen, le tab e i campi;
--   creare gli snapshot;
--   confrontare gli snapshot;
--   creare il report sintetico per screen;
--   esportare il CSV;
--   calcolare il piano di riordino;
--   applicare e verificare il riordino su Cloud.
+-   lettura e validazione degli argomenti CLI;
+-   recupero degli screen, delle tab e dei campi;
+-   associazione degli screen tra Data Center e Cloud;
+-   calcolo dell'ordine desiderato;
+-   applicazione e verifica del riordino su Cloud;
+-   generazione del report CSV.
 
 ## Sicurezza e manutenzione
 
 -   Non salvare `.env` nel repository: aggiungilo a `.gitignore`.
 -   Non inserire token o password nei log.
 -   Usa token con i permessi minimi necessari.
--   Preferisci una configurazione TLS valida rispetto alla
-    disattivazione della verifica del certificato.
+-   Preferisci sempre una configurazione TLS valida.
 -   Verifica che gli endpoint e il formato delle risposte siano
     compatibili con la versione della tua istanza Jira.
--   Esegui sempre l'anteprima del riordino prima di usare `--apply`.
+-   Controlla il report e i log al termine di ogni esecuzione.
